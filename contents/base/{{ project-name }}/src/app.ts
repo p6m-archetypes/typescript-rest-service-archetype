@@ -28,6 +28,13 @@ export async function buildApp(opts: BuildOptions = {}): Promise<FastifyInstance
   if (!opts.testing) {
     const { default: persistencePlugin } = await import('./plugins/persistence');
     await app.register(persistencePlugin);
+
+    // Sample scaffold: create the schema and serve CRUD for the items table
+    // (src/persistence/schema.ts, src/api/items.ts). Replace with your real model and routes.
+    const { ensureSchema } = await import('./persistence/init');
+    await ensureSchema(app.db);
+    const { default: itemRoutes } = await import('./api/items');
+    await app.register(itemRoutes);
   }
 {% endif %}{% if cache ~= 'None' %}
   if (!opts.testing) {

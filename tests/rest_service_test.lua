@@ -3,15 +3,19 @@
 --- Vitest suite, then boots the real service and proves the REST endpoint and the management sidecar
 --- (health probes + Prometheus metrics) answer over the wire.
 ---
---- The default configuration weaves in no resources (persistence/cache/messaging = None), so there
---- is a single variant - no database containers. The service is plain HTTP (Fastify) with a
---- management sidecar on a second port.
+--- The default configuration weaves in no resources (persistence/cache/messaging = None): plain
+--- HTTP (Fastify) with a management sidecar on a second port, and no database containers. The
+--- persistence variants (PostgreSQL/MySQL) each render with a real database container, boot the
+--- service against it, and prove REST CRUD calls round-trip into that database. This suite defines
+--- the archetype's acceptance bar — its job is to fill the gaps and keep them filled.
 ---
---- prova's in-process archetect engine renders once per run (prova.toml pins jobs = 1), so the whole
---- suite shares a single rendered tree (the `project` fixture). The static tier reads it with no
---- toolchain; the build and live tiers require `pnpm` (which drives Node) and skip cleanly without it.
+--- The static tier reads renders with no toolchain; the build and live tiers require `pnpm`
+--- (which drives Node) and the CRUD tiers additionally `docker`; each skips cleanly without them.
 ---
 --- Run from the archetype repo root (uses ./prova.toml):   prova
+
+local postgres = require("postgres")
+local mysql    = require("mysql")
 
 local SRC = "."
 
@@ -24,6 +28,19 @@ local ANSWERS = {
   suffix_name    = "Service",
   image_registry = "ghcr.io/acme",
 }
+
+local function answers_with(extra)
+  local out = {}
+  for k, v in pairs(ANSWERS) do out[k] = v end
+  for k, v in pairs(extra) do out[k] = v end
+  return out
+end
+
+-- `pnpm install` is idempotent, and on some node builds (e.g. nix nodejs 24 on macOS) pnpm
+-- crashes in libuv at process exit (kqueue.c EINTR assert) *after* the install has completed.
+-- Retry once: the second run is a fast no-op that confirms success; a genuine install failure
+-- fails both attempts.
+local PNPM_INSTALL = "pnpm install || pnpm install"
 
 -- prefix Example / suffix Service => project dir `example-service` (project-name), used as the
 -- package name and the platform manifest identity.
@@ -46,8 +63,17 @@ local EXPECTED_FILES = {
   ".platform/docker/prd/Dockerfile",
 }
 
--- Render once for the whole suite. prova's in-process archetect renders a single tree per process;
--- every tier below shares it. No toolchain needed - pure in-process render.
+-- Files the persistence scaffold must produce (relative to the rendered project root) —
+-- and that the hollow (None) rendering must NOT.
+local SCAFFOLD_FILES = {
+  "src/persistence/schema.ts",
+  "src/persistence/init.ts",
+  "src/api/items.ts",
+  "src/plugins/persistence.ts",
+}
+
+-- The default (None) rendering, shared by every hollow-variant tier below. No toolchain
+-- needed - pure in-process render.
 local project = prova.fixture("typescript-rest:project", Scope.Suite, function(ctx)
   local tree = archetect.render{
     source = SRC,
@@ -62,7 +88,7 @@ end)
 -- pnpm-gated groups, so `pnpm` is guaranteed present here.
 local installed = prova.fixture("typescript-rest:installed", Scope.Suite, function(ctx)
   local root = ctx:use(project)
-  local install = shell.run("pnpm install", { cwd = root.path, timeout = "300s" })
+  local install = shell.run(PNPM_INSTALL, { cwd = root.path, timeout = "300s" })
   assert(install:ok(), "pnpm install failed:\n" .. install.stderr .. install.stdout)
   return root
 end)
@@ -128,6 +154,15 @@ prova.group("typescript-rest layout", function(g)
     -- (GitHub Actions ${{ … }} expressions are excluded by the matcher).
     t:expect(t:use(project)):is_fully_rendered()
   end)
+
+  g:test("the hollow rendering stays hollow: no persistence scaffold files", function(t)
+    local root = t:use(project).path
+    t:expect_all(function()
+      for _, f in ipairs(SCAFFOLD_FILES) do
+        t:expect(fs.exists(root .. "/" .. f), f .. " must be absent"):is_false()
+      end
+    end)
+  end)
 end)
 
 -- Tier 2 - build + unit: the generated project's own Vitest suite passes.
@@ -168,3 +203,120 @@ prova.group("typescript-rest HTTP endpoints", { requires = { "pnpm" } }, functio
     t:expect(r.body, "Prometheus exposition format"):contains("# HELP")
   end)
 end)
+
+-- Persistence variants: one entry per rendering variant. `db` is the container recipe
+-- namespace; the SQL strings carry each backend's placeholder syntax (the scaffold table is
+-- lowercase `items`, so no identifier quoting is needed).
+local VARIANTS = {
+  {
+    persistence = "PostgreSQL",
+    db = postgres,
+    db_port = 5432,
+    count_by_name = "SELECT count(*) FROM items WHERE display_name = $1",
+    count_all     = "SELECT count(*) FROM items",
+  },
+  {
+    persistence = "MySQL",
+    db = mysql,
+    db_port = 3306,
+    count_by_name = "SELECT count(*) FROM items WHERE display_name = ?",
+    count_all     = "SELECT count(*) FROM items",
+  },
+}
+
+for _, v in ipairs(VARIANTS) do
+  local label = "typescript-rest[" .. v.persistence .. "]"
+
+  -- a) render — one fixture per variant, shared by verify and the black-box tests.
+  local variant_project = prova.fixture(label .. ":project", Scope.File, function(ctx)
+    return archetect.render{
+      source = SRC,
+      answers = answers_with{ persistence = v.persistence },
+      destination = ctx:tempdir(),
+      defaults = true,
+    }
+  end)
+
+  -- b) verify — layout, fully-rendered, and typecheck against that rendering.
+  archetect.verify(variant_project, {
+    name = label,
+    project_dir = PROJECT_DIR,
+    expected_files = {
+      "package.json",
+      "src/index.ts",
+      "src/app.ts",
+      "src/settings.ts",
+      "drizzle.config.ts",
+      SCAFFOLD_FILES[1], SCAFFOLD_FILES[2], SCAFFOLD_FILES[3], SCAFFOLD_FILES[4],
+      ".github/workflows/build.yaml",
+    },
+    yaml_globs = { ".platform/kubernetes/**/*.yaml" },
+    requires = { "pnpm" },
+    build_steps = { PNPM_INSTALL, "pnpm exec tsc --noEmit" },
+  })
+
+  -- c) black-box — provision the database, boot the rendered service against it.
+  local variant_service = prova.fixture(label .. ":service", Scope.File, function(ctx)
+    local root = ctx:use(variant_project):dir(PROJECT_DIR)
+    local db = v.db.container(ctx)
+
+    local install = shell.run(PNPM_INSTALL, { cwd = root.path, timeout = "300s" })
+    assert(install:ok(), label .. " pnpm install failed:\n" .. install.stderr .. install.stdout)
+
+    local port, mgmt = net.free_port(), net.free_port()
+    ctx:manage(shell.spawn("pnpm exec tsx src/index.ts", {
+      cwd = root.path,
+      env = {
+        HOST            = "127.0.0.1",
+        SERVER_PORT     = tostring(port),
+        MANAGEMENT_PORT = tostring(mgmt),
+        DB_HOST         = "127.0.0.1",
+        DB_PORT         = tostring(db.container:host_port(v.db_port)),
+        DB_USERNAME     = "prova",
+        DB_PASSWORD     = "prova",
+        DB_DBNAME       = "prova",
+      },
+    }))
+
+    -- The management sidecar proves the process is up; the service port only answers after
+    -- buildApp finished — i.e. after ensureSchema succeeded against the real database.
+    http.wait_for("http://127.0.0.1:" .. mgmt .. "/health/liveness", { timeout = "60s" })
+    local api = http.client{ base_url = "http://127.0.0.1:" .. port }
+    api:wait_for("/api/v1/ping", { timeout = "60s" })
+    return { api = api, db = db.client }
+  end)
+
+  prova.group(label .. " CRUD round-trip", { requires = { "docker", "pnpm" } }, function(g)
+    g:test("created items land in " .. v.persistence, function(t)
+      local svc = t:use(variant_service)
+
+      -- Create through the public API...
+      local created = svc.api:post("/api/items", { json = { displayName = "widget" } })
+      t:expect(created.status):equals(201)
+      local body = created:json()
+      t:expect(body.displayName):equals("widget")
+      t:expect(body.id, "created id"):is_truthy()
+
+      -- ...and prove the row exists in the actual database, not just the API's memory.
+      t:expect(svc.db:query_value(v.count_by_name, { "widget" }), "rows in DB"):equals(1)
+
+      -- Read back through every door.
+      t:expect(svc.api:get("/api/items/" .. body.id):json().displayName):equals("widget")
+    end)
+
+    g:test("updates and deletes round-trip into " .. v.persistence, function(t)
+      local svc = t:use(variant_service)
+
+      local body = svc.api:post("/api/items", { json = { displayName = "ephemeral" } }):json()
+
+      local updated = svc.api:put("/api/items/" .. body.id, { json = { displayName = "renamed" } })
+      t:expect(updated.status):equals(200)
+      t:expect(svc.db:query_value(v.count_by_name, { "renamed" }), "renamed row in DB"):equals(1)
+      t:expect(svc.db:query_value(v.count_by_name, { "ephemeral" }), "old name gone"):equals(0)
+
+      t:expect(svc.api:delete("/api/items/" .. body.id).status):equals(204)
+      t:expect(svc.api:get("/api/items/" .. body.id).status):equals(404)
+      t:expect(svc.db:query_value(v.count_by_name, { "renamed" }), "row deleted from DB"):equals(0)
+    end)
+  end)
+end
