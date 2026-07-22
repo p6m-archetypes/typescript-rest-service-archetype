@@ -1,5 +1,5 @@
 import Fastify, { FastifyInstance } from 'fastify';
-import { settings } from './settings';
+import { loggerOptions } from './logging';
 {% if has_s3 %}
 import { initS3 } from './resources/storage-s3';
 {% endif %}
@@ -13,7 +13,7 @@ export interface BuildOptions {
 
 export async function buildApp(opts: BuildOptions = {}): Promise<FastifyInstance> {
   const app = Fastify({
-    logger: { level: settings.logLevel },
+    logger: loggerOptions,
   });
 
   // Service routes

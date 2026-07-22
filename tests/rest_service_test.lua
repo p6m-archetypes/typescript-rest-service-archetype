@@ -43,8 +43,10 @@ end
 local PNPM_INSTALL = "pnpm install || pnpm install"
 
 -- prefix Example / suffix Service => project dir `example-service` (project-name), used as the
--- package name and the platform manifest identity.
+-- package name and the platform manifest identity. The scaffold CRUD lives at the platform
+-- standard base path: versioned, name-derived, kebab-case, naive plural (S2).
 local PROJECT_DIR = "example-service"
+local BASE = "/api/v1/examples"
 
 local EXPECTED_FILES = {
   "package.json",
@@ -54,10 +56,12 @@ local EXPECTED_FILES = {
   ".npmrc",
   "src/index.ts",
   "src/app.ts",
+  "src/logging.ts",
   "src/management.ts",
   "src/otel.ts",
   "src/settings.ts",
   "tests/health.test.ts",
+  ".dockerignore",
   ".github/workflows/build.yaml",
   ".platform/docker/local/Dockerfile",
   ".platform/docker/prd/Dockerfile",
@@ -289,7 +293,7 @@ for _, v in ipairs(VARIANTS) do
       local svc = t:use(variant_service)
 
       -- Create through the public API...
-      local created = svc.api:post("/api/items", { json = { displayName = "widget" } })
+      local created = svc.api:post(BASE, { json = { displayName = "widget" } })
       t:expect(created.status):equals(201)
       local body = created:json()
       t:expect(body.displayName):equals("widget")
@@ -299,21 +303,21 @@ for _, v in ipairs(VARIANTS) do
       t:expect(svc.db:query_value(v.count_by_name, { "widget" }), "rows in DB"):equals(1)
 
       -- Read back through every door.
-      t:expect(svc.api:get("/api/items/" .. body.id):json().displayName):equals("widget")
+      t:expect(svc.api:get(BASE .. "/" .. body.id):json().displayName):equals("widget")
     end)
 
     g:test("updates and deletes round-trip into " .. v.persistence, function(t)
       local svc = t:use(variant_service)
 
-      local body = svc.api:post("/api/items", { json = { displayName = "ephemeral" } }):json()
+      local body = svc.api:post(BASE, { json = { displayName = "ephemeral" } }):json()
 
-      local updated = svc.api:put("/api/items/" .. body.id, { json = { displayName = "renamed" } })
+      local updated = svc.api:put(BASE .. "/" .. body.id, { json = { displayName = "renamed" } })
       t:expect(updated.status):equals(200)
       t:expect(svc.db:query_value(v.count_by_name, { "renamed" }), "renamed row in DB"):equals(1)
       t:expect(svc.db:query_value(v.count_by_name, { "ephemeral" }), "old name gone"):equals(0)
 
-      t:expect(svc.api:delete("/api/items/" .. body.id).status):equals(204)
-      t:expect(svc.api:get("/api/items/" .. body.id).status):equals(404)
+      t:expect(svc.api:delete(BASE .. "/" .. body.id).status):equals(204)
+      t:expect(svc.api:get(BASE .. "/" .. body.id).status):equals(404)
       t:expect(svc.db:query_value(v.count_by_name, { "renamed" }), "row deleted from DB"):equals(0)
     end)
   end)
