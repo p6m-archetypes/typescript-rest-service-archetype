@@ -17,7 +17,7 @@ interface ItemParams {
 // name-derived, kebab-case, naive plural. Rename alongside src/persistence/schema.ts
 // when you add your real model. Writes generate ids in JS and read back after the
 // write so the routes stay dialect-portable (MySQL has no RETURNING clause).
-const base = '/api/v1/{{ prefix-name }}s';
+const base = '/api/v1/{{ entity-name }}s';
 
 const itemRoutes: FastifyPluginAsync = async (fastify) => {
   fastify.post<{ Body: ItemBody }>(base, async (request, reply) => {
