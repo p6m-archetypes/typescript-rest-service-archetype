@@ -3,7 +3,7 @@
 {% if persistence == 'PostgreSQL' %}
 import { pgTable, timestamp, varchar } from 'drizzle-orm/pg-core';
 
-export const items = pgTable('items', {
+export const items = pgTable('{{ entity_name }}s', {
   id: varchar('id', { length: 36 }).primaryKey(),
   displayName: varchar('display_name', { length: 255 }).notNull(),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
@@ -11,7 +11,7 @@ export const items = pgTable('items', {
 {% else %}
 import { mysqlTable, timestamp, varchar } from 'drizzle-orm/mysql-core';
 
-export const items = mysqlTable('items', {
+export const items = mysqlTable('{{ entity_name }}s', {
   id: varchar('id', { length: 36 }).primaryKey(),
   displayName: varchar('display_name', { length: 255 }).notNull(),
   createdAt: timestamp('created_at').notNull().defaultNow(),

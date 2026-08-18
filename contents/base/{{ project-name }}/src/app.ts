@@ -33,7 +33,7 @@ export async function buildApp(opts: BuildOptions = {}): Promise<FastifyInstance
     // (src/persistence/schema.ts, src/api/items.ts). Replace with your real model and routes.
     const { ensureSchema } = await import('./persistence/init');
     await ensureSchema(app.db);
-    const { default: itemRoutes } = await import('./api/items');
+    const { default: itemRoutes } = await import('./api/{{ entity_name }}s');
     await app.register(itemRoutes);
   }
 {% endif %}{% if cache ~= 'None' %}

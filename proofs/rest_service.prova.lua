@@ -38,7 +38,7 @@ end
 local SCAFFOLD_FILES = {
   "src/persistence/schema.ts",
   "src/persistence/init.ts",
-  "src/api/items.ts",
+  "src/api/examples.ts",
   "src/plugins/persistence.ts",
 }
 
