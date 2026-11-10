@@ -40,7 +40,7 @@ jobs:
           fi
           echo "Required secrets present."
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install archetect
         run: |
